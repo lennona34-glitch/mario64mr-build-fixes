@@ -4,6 +4,8 @@ built (install_mario64mr.py): the Unity bridge (unity_*.c/h, next to this file) 
 the game for mixed reality (Mario carried out into your room, hands in the game, the camera held still, a wider
 sky...). Every change is made from the pinned upstream file, so running it again is safe.
 """
+import hashlib
+import platform
 import re
 import shutil
 import struct
@@ -63,11 +65,32 @@ def replace_once(text, old, new):
 
 
 SIXTY_PATCH = "enhancements/60fps_ex.patch"
+# What prepare() left behind, to tell whether it needn't run again (if no file keeps its time, as on a Windows drive)
+MARKER = "mario64mr-patch-stamp"
+
+
+# Filesystems where a file written twice with the same text keeps its time (ext4, APFS...): elsewhere (FAT and exFAT
+# keep the write time only to two seconds, and go back an hour every winter) prepare() runs as before, every time
+UNCHANGED_FILES = ("Linux", "Darwin")
+
+
+def unchanged(path, content):
+    """The file holds content, which is bytes or text."""
+    return path.is_file() and path.read_bytes() == (content.encode() if isinstance(content, str) else content)
+
+
+def stamp(sixty, external_data):
+    return f"{REVISION} sixty={int(sixty)} external_data={int(external_data)}\n"
 
 
 def prepare(root, rom, sixty=True, external_data=True):
     if subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip() != REVISION:
         raise ValueError("Unexpected runtime revision")
+    # Already made so, with the same ROM: do nothing. Rewriting these files with the same text still updates their
+    # times, which makes make rebuild everything that is built from them (in full, on the second run too).
+    if (platform.system() in UNCHANGED_FILES and unchanged(root / "baserom.us.z64", rom)
+            and unchanged(root / MARKER, stamp(sixty, external_data))):
+        return
     # The PC port's own 60 fps interpolation: every game frame is drawn twice, first between the previous
     # frame and this one, then as it is. Restore what it touches, then apply it or not.
     patched = [line[6:] for line in (root / SIXTY_PATCH).read_text().splitlines() if line.startswith("+++ b/")]
@@ -355,3 +378,4 @@ def prepare(root, rom, sixty=True, external_data=True):
         raise ValueError("Invalid ROM audio sequence table")
     (root / "sound/sequences/00_sound_player.m64").write_bytes(rom[table + offset:table + offset + size])
     (root / "sound/sequences/00_sound_player.s").unlink(missing_ok=True)
+    (root / MARKER).write_text(stamp(sixty, external_data))

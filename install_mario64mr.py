@@ -21,8 +21,6 @@ usage:
     python3 install_mario64mr.py "Super Mario 64 (USA).z64" --push --label my-label.png
                                                                        # ...with your own cartridge label
     python3 install_mario64mr.py "Super Mario 64 (USA).z64" --check    # only checks the ROM
-    python3 install_mario64mr.py "Super Mario 64 (USA).z64" --push --frame --apk Mario64MR-SteamFrame.apk
-                                                                       # ...to a Steam Frame, over Wi-Fi
 
 Needs python3, git, make, patch and a C compiler (macOS: Xcode command line tools; Linux: build-essential;
 Windows: WSL). The Android NDK (r27c) is found where Android Studio or Homebrew put it, or downloaded (~700 MB) the
@@ -31,19 +29,34 @@ before anything else: a different region, a ROM hack, a bad dump or a zipped ROM
 """
 import argparse
 import glob
-import hashlib
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import struct
-import subprocess
 import sys
 import time
 import urllib.request
 import zipfile
 from pathlib import Path
+
+# (the pack build on Windows runs under MSYS2's python3, which has been seen to fail at subprocess and at hashlib
+#  when MSYS2's own OpenSSL is missing. Neither is needed to check the ROM or to plan, so neither is required here:
+#  the build starts a process only on macOS and Linux)
+try:
+    import hashlib
+except ImportError:
+    hashlib = None
+try:
+    import subprocess
+except ImportError:
+    subprocess = None
+try:
+    import json
+except ImportError:
+    json = None
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "native/fullgame"))
@@ -76,6 +89,8 @@ def native(path):
 
 def run(cmd, cwd=None, env=None):
     print("+", " ".join(str(c) for c in cmd), flush=True)
+    if subprocess is None:  # (MSYS2's python3: the pack build there is make's, started by build_pack)
+        sys.exit("this build starts no processes of its own: on Windows, run install_mario64mr.bat")
     subprocess.run([str(c) for c in cmd], cwd=cwd, check=True, env=env)
 
 
@@ -129,8 +144,11 @@ def read_rom(path):
         for i in range(0, len(rom) - 3, 4):
             rom[i:i + 4] = rom[i:i + 4][::-1]
     rom = bytes(rom)
-    sha1 = hashlib.sha1(rom).hexdigest()
-    if sha1 == US_SHA1:
+    if hashlib is not None:
+        sha1 = hashlib.sha1(rom).hexdigest()
+    else:  # (a python without hashlib: the launcher, install_mario64mr.ps1, has checked it already)
+        sha1 = "unchecked here: the launcher checked it"
+    if hashlib is not None and sha1 == US_SHA1:
         print(f"ROM: Super Mario 64 (USA), {order}, SHA-1 matches", flush=True)
         return rom
     name, code, region, revision = describe_rom(rom)
@@ -159,6 +177,80 @@ def fetch(url, revision, work, shallow=False):
 
 # ------------------------------------------------------------------------------------------------ the game data
 
+STALL_SECONDS = 240  # (the pack build writing nothing this long: not slow, stuck: see pack_stalled())
+
+
+def newest(directory):
+    """The time of the most recently written file under directory (what says a build is still going), or None."""
+    latest = None
+    for root, _, names in os.walk(directory):
+        for name in names:
+            try:
+                m = os.path.getmtime(os.path.join(root, name))
+            except OSError:
+                continue
+            if latest is None or m > latest:
+                latest = m
+    return latest
+
+
+def pack_stalled(built_at):
+    """Whether the pack build has written nothing for STALL_SECONDS, with its make still running: the MSYS2 tools that
+    make the sound take very little of the time (seen on one machine: minutes per sample file), so a pack build
+    that stops progressing is treated as that, and the pack is built in WSL instead (make_game_wsl.py)."""
+    if not MSYS:
+        return False
+    make = subprocess.run(["tasklist", "/fi", "imagename eq make.exe", "/fo", "csv"], capture_output=True, text=True)
+    if "make.exe" not in make.stdout.lower():
+        return False
+    return time.time() - built_at > STALL_SECONDS
+
+
+def plan_wsl_pack(work):
+    """What the pack build needs on the WSL side (a few tens of MB, not the work folder's gigabytes of ROM assets and
+    build output), as make_game_wsl.py --copy takes it."""
+    copy = [p for p in ("sound", "assets", "levels", "Makefile", "Makefile.split", "include", "src", "enhancements",
+                        "rsp", "textures", "tools", "charmap.txt", "charmap_menu.txt") if (work / p).exists()]
+    return {"source": native(work).rstrip("/"), "destination": "~/mario64mr-wsl/" + work.name, "copy": copy,
+            "build_dir": PACK_BUILD}
+
+
+def wsl(*args, tools=None):
+    """make_game_wsl.py (tools), run by WSL with these arguments: Windows paths become WSL's, and the script runs from
+    the WSL home (this is the Windows build: WSL is there, under its own home)."""
+    # (on Windows, WSL takes these at once; inside WSL, its own paths: wsl.exe is still there to find it)
+    to_wsl = (lambda a: run_out(["wsl.exe", "wslpath", "-u", str(a)])) if not on_in_wsl() else str
+    quoted = " ".join(shlex.quote(to_wsl(a) if os.path.isabs(str(a)) and not str(a).startswith("/mnt/") else str(a))
+                      for a in args)
+    script = to_wsl(tools)
+    run(["wsl.exe", "-e", "bash", "-lc", "cd \"$HOME\" && python3 %s %s" % (shlex.quote(script), quoted)])
+
+
+def on_in_wsl():
+    """Whether this is running inside WSL (Linux), not on Windows."""
+    return platform.system() == "Linux" and "microsoft" in platform.uname().release.lower()
+
+
+def build_pack_in_wsl(work, plan):
+    """The pack build where MSYS2's sound tools hang: the same build, made by WSL (Linux gcc, its own fork), from a
+    copy of what it needs, then copied back into the work folder as if it had been made there."""
+    plan_path = work / "pack-plan.json"
+    plan_path.write_text(json.dumps(plan))
+    print("The pack build has stopped making progress (its sound tools are very slow on some Windows setups). "
+          "Building the pack in WSL instead...", flush=True)
+    tools = HERE / "windows/make_game_wsl.py"
+    wsl("--copy", plan_path, tools=tools)
+    wsl("--pack", plan_path, tools=tools)
+    there = Path(run_out(["wsl.exe", "-e", "bash", "-lc", 'echo "$HOME/mario64mr-wsl/%s"' % work.name]))
+    for top in ("build/pack", "assets", "textures", "sound"):
+        src = there / top
+        if src.is_dir():
+            shutil.copytree(src, work / top, dirs_exist_ok=True)
+
+
+def run_out(cmd):
+    return subprocess.check_output([str(c) for c in cmd], text=True).strip()
+
 def prepare_pack(work, rom):
     # macOS ships GNU Make 3.81, which predates "!=" assignments
     makefile = subprocess.check_output(["git", "show", "HEAD:Makefile"], cwd=work, text=True)
@@ -173,16 +265,81 @@ def prepare_pack(work, rom):
     (work / "sound/sequences/00_sound_player.s").unlink(missing_ok=True)
 
 
+def jobs():
+    """How many jobs to run at once: two per core (the usual oversubscription: much of a build is one core waiting on
+    a file), at least 4."""
+    return str(max(4, 2 * (os.cpu_count() or 4)))
+
+
+def extracted(work):
+    """Whether extract_assets.py has run here: what it makes, and the build needs. Its music sequences are the ones
+    that matter for the check: the pack build's Makefile depends on the sound/sequences/us directory itself, and
+    make fails with "No rule to make target 'sound/sequences/us'" when it is missing (assets/demo_data.json alone
+    was not enough: it is written before the sequences)."""
+    return (work / "assets/demo_data.json").is_file() and any((work / "sound/sequences/us").glob("*.m64"))
+
+
+def count(directory, pattern):
+    return len(list(directory.rglob(pattern))) if directory.is_dir() else 0
+
+
+def extract(work):
+    """extract_assets.py, followed while it runs: it says nothing between "extracting" and finishing (the sound
+    samples are one long call to disassemble_sound.py), so on a slow disk it looks hung for tens of minutes. This
+    reports what it has made so far every 30 seconds: samples, textures, sequences."""
+    print("Extracting the game's assets from the ROM (it says nothing while it works: counted below)", flush=True)
+    began = time.time()
+    process = subprocess.Popen([sys.executable, "extract_assets.py", "us"], cwd=work,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    while process.poll() is None:
+        time.sleep(30)
+        if process.poll() is not None:
+            break
+        print("  %d:%02d  textures %d, sound samples %d/219, music sequences %d/34"
+              % ((time.time() - began) // 60, (time.time() - began) % 60,
+                 count(work / "textures", "*.png"), count(work / "sound/samples", "*.aiff"),
+                 count(work / "sound/sequences/us", "*.m64")), flush=True)
+    if process.returncode != 0:
+        sys.exit(f"extract_assets.py failed ({process.returncode})")
+    print("  %d:%02d  extracted" % ((time.time() - began) // 60, (time.time() - began) % 60), flush=True)
+
+
 def build_pack(work):
-    run(["make", "-C", "tools", "-j1"], cwd=work)  # (its audiofile library is not parallel-safe)
-    run([sys.executable, "extract_assets.py", "us"], cwd=work)
+    # (tools/common: the library tabledesign links against, built first. Upstream's tools/Makefile has no edge from
+    #  tabledesign to audiofile/libaudiofile.a, so make -j can link it before the library exists: "cannot find
+    #  -laudiofile". Built alone first, then the rest in parallel.)
+    run(["make", "-C", "tools/audiofile", "-j" + jobs()], cwd=work)
+    run(["make", "-C", "tools", "-j" + jobs()], cwd=work)
+    # (extracted once: on a Windows drive its tens of thousands of small files take minutes to check again)
+    if not extracted(work):
+        extract(work)
     # Only the resource pack's parts of the game build: the sound banks, and the skyboxes (and cake) cut into tiles
     targets = [f"{PACK_BUILD}/sound/sound_data.ctl", f"{PACK_BUILD}/sound/sequences.bin"]
     targets += [f"{PACK_BUILD}/bin/{p.stem}_skybox.c" for p in sorted((work / "textures/skyboxes").glob("*.png"))]
     targets.append(f"{PACK_BUILD}/levels/ending/cake.inc.c")  # (the ending's cake picture, cut the same way)
     # (the system's compiler and preprocessor: on macOS the Makefile would look for Homebrew's gcc)
-    run(["make", "-j4", "VERSION=us", "EXTERNAL_DATA=1", "BUILD_DIR=" + PACK_BUILD, "NOEXTRACT=1", "HOST_OS=Linux",
-         "OSX_BUILD=0", "CC=cc", "CXX=c++", "CPP=cc -E -P -x c"] + targets, cwd=work)
+    command = ["make", "-j" + jobs(), "VERSION=us", "EXTERNAL_DATA=1", "BUILD_DIR=" + PACK_BUILD, "NOEXTRACT=1",
+               "HOST_OS=Linux", "OSX_BUILD=0", "CC=cc", "CXX=c++", "CPP=cc -E -P -x c"] + targets
+    print("+", " ".join(command), flush=True)
+    make = subprocess.Popen([str(c) for c in command], cwd=work)
+    built = newest(work / PACK_BUILD) or time.time()
+    stalled = False
+    # (in pieces, so a build that stops writing files (not slow: stuck, on Windows: its sound tools don't run under
+    #  MSYS2) is noticed rather than waited on)
+    while make.poll() is None:
+        time.sleep(10)
+        built_now = newest(work / PACK_BUILD)
+        if built_now and built_now > built:
+            built = built_now
+        stalled = pack_stalled(built)
+        if stalled:
+            make.kill()
+            make.wait()
+            break
+    if stalled:
+        build_pack_in_wsl(work, plan_wsl_pack(work))
+    elif make.returncode != 0:
+        sys.exit(f"make failed ({make.returncode})")
 
 
 def pack(work, out):
@@ -384,7 +541,7 @@ def build_game(work, rom, ndk, out):
         demo.write_bytes(bytes(4))
     cc, cxx = make_compilers(ndk, work)
     flags = "-Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
-    run(["make", "-j" + str(os.cpu_count() or 4), "HOST_OS=Linux", "OSX_BUILD=0", "BUILD_DIR=" + GAME_BUILD,
+    run(["make", "-j" + jobs(), "HOST_OS=Linux", "OSX_BUILD=0", "BUILD_DIR=" + GAME_BUILD,
          "CC=" + cc, "CXX=" + cxx, "LD=" + cc, "CPP=" + cc + " -E -P -x c",
          "RENDER_API=UNITY", "WINDOW_API=UNITY", "AUDIO_API=UNITY", "CONTROLLER_API=UNITY", "NOEXTRACT=1",
          "EXTERNAL_DATA=1", "EXT_OPTIONS_MENU=1", "TEXTURE_FIX=0", "BETTERCAMERA=0", "NODRAWINGDISTANCE=0",
@@ -427,11 +584,96 @@ def build_goddard(decomp, extracted, ndk, work, out):
         + [native(p) for p in sources] + ["-lm"])
 
 
+# import_mario_geo()'s templates: libsm64's own, so what it makes is what its build expects (the includes are relative
+# to src/decomp/mario)
+GEO_INC_C_HEADER = """
+#include "../include/sm64.h"
+#include "../include/types.h"
+#include "../include/geo_commands.h"
+#include "../game/rendering_graph_node.h"
+#include "../shim.h"
+#include "../game/object_stuff.h"
+#include "../game/behavior_actions.h"
+#include "model.inc.h"
+
+#define SHADOW_CIRCLE_PLAYER 99
+"""
+
+GEO_INC_C_FOOTER = """
+const GeoLayout mario_geo_libsm64[] = {
+   GEO_SHADOW(SHADOW_CIRCLE_PLAYER, 0xB4, 100),
+   GEO_OPEN_NODE(),
+      GEO_ZBUFFER(1),
+      GEO_OPEN_NODE(),
+         GEO_SCALE(0x00, 16384),
+         GEO_OPEN_NODE(),
+            GEO_ASM(0, geo_mirror_mario_backface_culling),
+            GEO_ASM(0, geo_mirror_mario_set_alpha),
+            GEO_BRANCH(1, mario_geo_load_body),
+            GEO_ASM(1, geo_mirror_mario_backface_culling),
+         GEO_CLOSE_NODE(),
+      GEO_CLOSE_NODE(),
+   GEO_CLOSE_NODE(),
+   GEO_END(),
+};
+
+void *mario_geo_ptr = (void*)mario_geo_libsm64;
+
+"""
+
+GEO_INC_H = """
+#pragma once
+
+extern void *mario_geo_ptr;
+"""
+
+MODEL_INC_H = """
+#pragma once
+
+#include "../include/types.h"
+#include "../include/PR/gbi.h"
+"""
+
+
+LIB_SM64_REVISION = "06ec56df7f951f88da05f468cdcacecba496145a"  # (the sources import-mario-geo.py takes Mario from)
+
+
+def import_mario_geo(libsm64):
+    """Mario's model, from the decomp's sources: what libsm64's import-mario-geo.py makes (its four files, transformed
+    the same way), made here instead of run as an outside script: one fewer process to start, and its output is the
+    installer's."""
+    files = ("geo.inc.c", "model.inc.c", "model.inc.h", "geo.inc.h")
+    if all((libsm64 / "src/decomp/mario" / n).is_file() for n in files):
+        return
+    base = "https://raw.githubusercontent.com/n64decomp/sm64/%s/actors/mario/" % LIB_SM64_REVISION
+    print("Downloading " + base + "geo.inc.c and model.inc.c (Mario's model)", flush=True)
+    geo = urllib.request.urlopen(base + "geo.inc.c", timeout=60).read().decode()
+    model = urllib.request.urlopen(base + "model.inc.c", timeout=60).read().decode()
+    lines, skip, header = model.splitlines(), 0, MODEL_INC_H
+    for i, line in enumerate(lines):
+        if skip:  # (the model's own textures: libsm64 draws Mario from the ROM's, so these are left out)
+            skip -= 1
+            lines[i] = "//" + line
+        elif line.startswith("ALIGNED8 static const u8 mario_"):
+            skip = 2
+            lines[i] = "//" + line
+        elif line.startswith("const "):
+            header += "\nextern " + line.replace(" = {", ";")
+    # (libsm64's script inserts them one at a time at the top, so the second one ends up first)
+    lines[:0] = ['#include "../../load_tex_data.h"', '#include "../../gfx_macros.h"']
+    mario = libsm64 / "src/decomp/mario"
+    shutil.rmtree(mario, ignore_errors=True)
+    mario.mkdir(parents=True)
+    (mario / "geo.inc.c").write_text(GEO_INC_C_HEADER + geo + GEO_INC_C_FOOTER)
+    (mario / "model.inc.c").write_text("\n".join(lines))
+    (mario / "model.inc.h").write_text(header)
+    (mario / "geo.inc.h").write_text(GEO_INC_H)
+
+
 def build_libsm64(libsm64, ndk, out):
     """libsm64.so: libsm64 as it is upstream (the title screen plays the game's music and sounds through it, from
     your ROM)."""
-    if not (libsm64 / "src/decomp/mario/geo.inc.c").is_file():
-        run([sys.executable, "import-mario-geo.py"], cwd=libsm64)  # (Mario's model, from the decomp's sources)
+    import_mario_geo(libsm64)
     dirs = ["src", "src/decomp", "src/decomp/engine", "src/decomp/include/PR", "src/decomp/game", "src/decomp/pc",
             "src/decomp/pc/audio", "src/decomp/mario", "src/decomp/tools", "src/decomp/audio"]
     sources = sorted(str(p.relative_to(libsm64)) for d in dirs for p in (libsm64 / d).glob("*.c"))
@@ -457,30 +699,10 @@ def add_label(picture, out):
     shutil.copy2(picture, out / ("label" + (".png" if ext == ".png" else ".jpg")))
 
 
-def connect_frame(host, wait):
-    """The Steam Frame, over Wi-Fi: its Android apps run in Lepton, which adb reaches as host:5555 (the headset's
-    hostname is frame unless you changed it; its IP address works too). Every adb command after goes to it."""
-    serial = host if ":" in host else host + ":5555"
-    os.environ["ANDROID_SERIAL"] = serial
-    while True:
-        result = subprocess.run(["adb", "connect", serial], capture_output=True, text=True)
-        said = result.stdout.strip() or result.stderr.strip()  # (stderr has adb's own "daemon started" too)
-        if result.returncode == 0 and "connected to" in said:
-            print(said)
-            return
-        if not wait:
-            sys.exit(f"No Steam Frame at {serial} ({said}): turn on Developer Mode, start Lepton Development from "
-                     "your Library, and run again (or give its IP address: --frame 192.168.1.23)")
-        input(f"\nNo Steam Frame at {serial} ({said}).\nOn the Frame: Developer Mode on, then start Lepton Development "
-              "from your Library (an Android home screen opens).\nSame Wi-Fi as this computer. Then press Enter here... ")
-
-
-def push(out, wait=False, apk=None, frame=None):
+def push(out, wait=False, apk=None):
     if MSYS:
         # adb is a Windows program: MSYS2 would turn its headset paths (/sdcard/...) into Windows ones
         os.environ["MSYS2_ARG_CONV_EXCL"] = "*"
-    if frame:
-        connect_frame(frame, wait)
     while True:
         devices = subprocess.run(["adb", "devices"], capture_output=True, text=True, check=True).stdout
         if "\tdevice" in devices:
@@ -515,10 +737,7 @@ def push(out, wait=False, apk=None, frame=None):
         run(["adb", "shell", "rm", "-f", DEVICE_FOLDER + "/label.png", DEVICE_FOLDER + "/label.jpg"])
         run(["adb", "push", native(labels[0]), DEVICE_FOLDER + "/"])
     run(["adb", "shell", "am", "force-stop", PACKAGE])
-    if frame:
-        print("On the Steam Frame. Start Mario 64 MR from Lepton Development's home screen.")
-    else:
-        print("On the headset. Start Mario 64 MR from your Library (Unknown Sources, or search for \"Mario\").")
+    print("On the headset. Start Mario 64 MR from your Library (Unknown Sources, or search for \"Mario\").")
 
 
 def main():
@@ -533,9 +752,6 @@ def main():
     parser.add_argument("--check", action="store_true", help="only check the ROM, and stop")
     parser.add_argument("--wait", action="store_true", help="with --push: if no headset is connected, wait for it")
     parser.add_argument("--apk", type=Path, help="with --push: also install the app (Mario64MR.apk) on the headset")
-    parser.add_argument("--frame", nargs="?", const="frame", metavar="HOST",
-                        help="with --push: send it to a Steam Frame over Wi-Fi (its hostname, frame unless you changed "
-                             "it, or its IP address), with Lepton Development running on it")
     args = parser.parse_args()
     # The ROM first: the most likely thing to be wrong, and nothing should be fetched, built or pushed until it's right
     try:
@@ -544,9 +760,13 @@ def main():
         sys.exit(str(problem))
     if args.check:
         return
-    for tool in ("git", "make", "patch", "cc"):
-        if shutil.which(tool) is None:
-            sys.exit(f"{tool} not found (see the top of this script for what is needed)")
+    missing = [t for t in ("git", "make", "patch", "cc") if shutil.which(t) is None]
+    if missing:
+        # (what to do about it, where the machine is known: a bare "cc not found" deep inside make is far less useful)
+        if on_in_wsl():
+            sys.exit(f"{', '.join(missing)} not found: this WSL has no build tools yet. Install them, then run this "
+                     f"again:\n  sudo apt update && sudo apt install -y build-essential git python3")
+        sys.exit(f"{', '.join(missing)} not found (see the top of this script for what is needed)")
     work, out = args.work.resolve(), args.out.resolve()
     if on_windows_drive(work):
         print(f"Note: {work} is on a Windows drive. It works, but building there is much slower than in your WSL "
@@ -576,7 +796,7 @@ def main():
         print(f"{out / 'native' / name}: {(out / 'native' / name).stat().st_size / 1e6:.1f} MB")
 
     if args.push:
-        push(out, args.wait, args.apk, args.frame)
+        push(out, args.wait, args.apk)
     else:
         print(f"Done: {out}. To the headset: python3 {Path(sys.argv[0]).name} <rom> --push  (or the README's adb push)")
 
