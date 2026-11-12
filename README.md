@@ -64,13 +64,22 @@ The tool in this repository makes the game from your ROM on your own computer, a
   - **Mac or Linux**: `python3`, `git`, `make`, `patch` and a C compiler.
     - Mac: `xcode-select --install`
     - Ubuntu: `sudo apt install build-essential git python3`
-  - (WSL on Windows works too, like Linux. Put this repository in your WSL home (`cd ~`, then `git clone` it there)
+  - (WSL on Windows works too, like Linux. A fresh WSL has no build tools: it needs `build-essential`
+    (`sudo apt install build-essential`), and the tool says so before building rather than failing inside `make`.
+    `adb` is only needed to send the game to the headset (`--push`): `sudo apt install adb`. Put this repository in
+    your WSL home (`cd ~`, then `git clone` it there)
     rather than on a Windows drive (`/mnt/c/...`): building there is much slower, and long paths can go past
     Windows' limit.)
 - The Android NDK (optional): the tool finds one installed by Android Studio, Homebrew (`brew install --cask android-ndk`)
   or Unity, and otherwise downloads r27c from Google the first time (about 700 MB, 2 GB unpacked).
 
 ## Install
+
+> **How long it takes**: on a 16-core machine, building in WSL on the Linux filesystem took **1 m 27 s** with the
+> Android NDK already present, and about **5 minutes** including the NDK download (~700 MB). Building on a Windows
+> drive (`/mnt/c/...`) is far slower: extracting the assets alone did not finish in 20 minutes there, against **30
+> seconds** on the Linux filesystem. If a build seems stuck, see [Builds that seem stuck](#builds-that-seem-stuck).
+
 
 ### On Windows
 
@@ -418,6 +427,11 @@ To install it, follow [Install](#install) with `Mario64MR-Pico.apk` in place of 
   for Windows: run the tool from your WSL home (`cd ~`) instead of a Windows drive (`/mnt/c/...`).
 - **The tool fails building**: check that `make` and a C compiler work (`cc --version`). Then delete
   `Mario64MRData-work/` and run it again.
+- **Builds that seem stuck**: extracting the game's assets prints nothing for minutes at a time (the sound samples are
+  one long step), so the tool counts them as it goes (`textures 516, sound samples 219/219, music sequences 34/34`,
+  every 30 seconds). If those numbers stop rising for a long time, and especially on a Windows drive, move the work
+  folder to the Linux filesystem: `python3 install_mario64mr.py <rom> --work ~/Mario64MRData-work`, or run it all
+  under WSL.
 - **The cartridge falls through the table, or Mario has nothing to land on**: run Space Setup again, and allow the
   app to use your space.
 

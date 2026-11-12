@@ -174,15 +174,75 @@ def prepare_pack(work, rom):
     (work / "sound/sequences/00_sound_player.s").unlink(missing_ok=True)
 
 
+def jobs():
+    """How many jobs to run at once: two per core (the usual oversubscription: much of a build is one core waiting on
+    a file), at least 4."""
+    return str(max(4, 2 * (os.cpu_count() or 4)))
+
+
+def extracted(work):
+    """Whether extract_assets.py has run here: what it makes, and the build needs. Its music sequences are the ones
+    that matter for the check: the pack build's Makefile depends on the sound/sequences/us directory itself, and
+    make fails with "No rule to make target 'sound/sequences/us'" when it is missing (assets/demo_data.json alone
+    was not enough: it is written before the sequences)."""
+    return (work / "assets/demo_data.json").is_file() and any((work / "sound/sequences/us").glob("*.m64"))
+
+
+def count(directory, pattern):
+    return len(list(directory.rglob(pattern))) if directory.is_dir() else 0
+
+
+def extract(work):
+    """extract_assets.py, followed while it runs: it says nothing between "extracting" and finishing (the sound
+    samples are one long call to disassemble_sound.py), so on a slow disk it looks hung for tens of minutes. This
+    reports what it has made so far every 30 seconds: samples, textures, sequences.
+
+    Its own output goes to extract-assets.log in the work folder rather than the screen (thousands of lines between
+    the counts): the end of it is printed if it fails, so a failure says why and not just an exit code."""
+    log_path = work / "extract-assets.log"
+    print(f"Extracting the game's assets from the ROM (it says nothing while it works: counted below, and its output "
+          f"goes to {log_path})", flush=True)
+    began = time.time()
+    with open(log_path, "wb") as log:
+        process = subprocess.Popen([sys.executable, "extract_assets.py", "us"], cwd=work,
+                                   stdout=log, stderr=subprocess.STDOUT)
+        while process.poll() is None:
+            for _ in range(30):  # (a second at a time: a fast failure isn't waited out)
+                time.sleep(1)
+                if process.poll() is not None:
+                    break
+            if process.poll() is not None:
+                break
+            print("  %d:%02d  textures %d, sound samples %d/219, music sequences %d/34"
+                  % ((time.time() - began) // 60, (time.time() - began) % 60,
+                     count(work / "textures", "*.png"), count(work / "sound/samples", "*.aiff"),
+                     count(work / "sound/sequences/us", "*.m64")), flush=True)
+    if process.returncode != 0:
+        lines = log_path.read_text(errors="replace").splitlines()
+        # (the reason is usually the last thing it said; the whole log stays next to the sources)
+        errors = [line for line in lines if "error" in line.lower() or "traceback" in line.lower()]
+        tail = lines[-40:]
+        shown = tail if not errors or errors[-1] in tail else errors[-5:] + ["..."] + tail[-10:]
+        sys.exit(f"extract_assets.py failed ({process.returncode}). The end of its output ({log_path}):\n"
+                 + "\n".join("  " + line for line in shown))
+    print("  %d:%02d  extracted" % ((time.time() - began) // 60, (time.time() - began) % 60), flush=True)
+
+
 def build_pack(work):
-    run(["make", "-C", "tools", "-j1"], cwd=work)  # (its audiofile library is not parallel-safe)
-    run([sys.executable, "extract_assets.py", "us"], cwd=work)
+    # (tools/audiofile: the library tabledesign links against, built first. Upstream's tools/Makefile has no edge
+    #  from tabledesign to audiofile/libaudiofile.a, so make -j can link it before the library exists: "cannot find
+    #  -laudiofile". Built alone first, then the rest in parallel.)
+    run(["make", "-C", "tools/audiofile", "-j" + jobs()], cwd=work)
+    run(["make", "-C", "tools", "-j" + jobs()], cwd=work)
+    # (extracted once: on a Windows drive its tens of thousands of small files take minutes to check again)
+    if not extracted(work):
+        extract(work)
     # Only the resource pack's parts of the game build: the sound banks, and the skyboxes (and cake) cut into tiles
     targets = [f"{PACK_BUILD}/sound/sound_data.ctl", f"{PACK_BUILD}/sound/sequences.bin"]
     targets += [f"{PACK_BUILD}/bin/{p.stem}_skybox.c" for p in sorted((work / "textures/skyboxes").glob("*.png"))]
     targets.append(f"{PACK_BUILD}/levels/ending/cake.inc.c")  # (the ending's cake picture, cut the same way)
     # (the system's compiler and preprocessor: on macOS the Makefile would look for Homebrew's gcc)
-    run(["make", "-j4", "VERSION=us", "EXTERNAL_DATA=1", "BUILD_DIR=" + PACK_BUILD, "NOEXTRACT=1", "HOST_OS=Linux",
+    run(["make", "-j" + jobs(), "VERSION=us", "EXTERNAL_DATA=1", "BUILD_DIR=" + PACK_BUILD, "NOEXTRACT=1", "HOST_OS=Linux",
          "OSX_BUILD=0", "CC=cc", "CXX=c++", "CPP=cc -E -P -x c"] + targets, cwd=work)
 
 
@@ -288,6 +348,11 @@ def find_ndk(work, given):
             print(f"Android NDK: {c}")
             return Path(c).resolve()  # (make runs in other folders: a relative --ndk wouldn't be found from there)
     return download_ndk(work)
+
+
+def on_in_wsl():
+    """Whether this is running inside WSL (Linux), not on Windows."""
+    return platform.system() == "Linux" and "microsoft" in platform.uname().release.lower()
 
 
 def on_windows_drive(path):
@@ -434,7 +499,7 @@ def build_game(work, rom, ndk, out):
         demo.write_bytes(bytes(4))
     cc, cxx = make_compilers(ndk, work)
     flags = "-Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
-    run(["make", "-j" + str(os.cpu_count() or 4), "HOST_OS=Linux", "OSX_BUILD=0", "BUILD_DIR=" + GAME_BUILD,
+    run(["make", "-j" + jobs(), "HOST_OS=Linux", "OSX_BUILD=0", "BUILD_DIR=" + GAME_BUILD,
          "CC=" + cc, "CXX=" + cxx, "LD=" + cc, "CPP=" + cc + " -E -P -x c",
          "RENDER_API=UNITY", "WINDOW_API=UNITY", "AUDIO_API=UNITY", "CONTROLLER_API=UNITY", "NOEXTRACT=1",
          "EXTERNAL_DATA=1", "EXT_OPTIONS_MENU=1", "TEXTURE_FIX=0", "BETTERCAMERA=0", "NODRAWINGDISTANCE=0",
@@ -665,6 +730,10 @@ def main():
         return
     for tool in ("git", "make", "patch", "cc") + (("clang", "ld.lld") if ARM64_LINUX else ()):
         if shutil.which(tool) is None:
+            # (what to do about it, where the machine is known: a bare "cc not found" deep inside make is far less useful)
+            if on_in_wsl():
+                sys.exit(f"{tool} not found: this WSL has no build tools yet. Install them, then run this again:\n"
+                         f"  sudo apt update && sudo apt install -y build-essential git python3")
             sys.exit(f"{tool} not found (see the top of this script for what is needed)")
     work, out = args.work.resolve(), args.out.resolve()
     if on_windows_drive(work):
