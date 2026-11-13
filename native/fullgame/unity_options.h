@@ -17,6 +17,7 @@ enum UnityOption {
     UNITY_OPT_SFX_VOLUME,
     UNITY_OPT_ENV_VOLUME,
     UNITY_OPT_HUD,           /* 0 hidden, 1 shown */
+    UNITY_OPT_HANDS,         /* your hands over the portal: 0 Mario's gloves, 1 your own (passthrough) */
     UNITY_OPT_COUNT
 };
 extern unsigned int gUnityOptions[UNITY_OPT_COUNT];

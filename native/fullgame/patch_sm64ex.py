@@ -25,6 +25,7 @@ MR_STRINGS = """
 #define TEXT_MR_TEXTURES     _("Textures")
 #define TEXT_MR_SHARPENING   _("Sharpening")
 #define TEXT_MR_DEFAULTS     _("Back to defaults")
+#define TEXT_MR_HANDS        _("Hands")
 #define TEXT_MR_72HZ    _("72 Hz")
 #define TEXT_MR_80HZ    _("80 Hz")
 #define TEXT_MR_90HZ    _("90 Hz")
@@ -53,6 +54,8 @@ MR_STRINGS = """
 #define TEXT_MR_ANISO16 _("Anisotropic 16x")
 #define TEXT_MR_NORMAL  _("Normal")
 #define TEXT_MR_QUALITY _("Quality")
+#define TEXT_MR_GLOVES  _("Gloves")
+#define TEXT_MR_YOURS   _("Your own")
 """
 
 

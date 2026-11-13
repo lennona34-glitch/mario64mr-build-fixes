@@ -17,7 +17,7 @@
 #define EXPORT __attribute__((visibility("default")))
 
 /* The options menu's values (unity_options.h); Unity sets them from what it kept as the game starts */
-unsigned int gUnityOptions[UNITY_OPT_COUNT] = { 2, 3, 2, 2, 4, 0, 0, 0, 127, 127, 127, 127, 1 };
+unsigned int gUnityOptions[UNITY_OPT_COUNT] = { 2, 3, 2, 2, 4, 0, 0, 0, 127, 127, 127, 127, 1, 0 };
 EXPORT unsigned int *sm64unity_options(void) { return gUnityOptions; }
 EXPORT int sm64unity_option_count(void) { return UNITY_OPT_COUNT; }
 
