@@ -19,7 +19,7 @@ hand. Your left hand reaches in, picks Mario up, and carries him out onto your d
 - **Diorama**: put the window down on a table and the whole level rises out of it, a little world you can walk
   around, move, turn and scale while you play.
 - **Options** in the game's pause menu: refresh rate, resolution, anti-aliasing, foveation, texture filtering,
-  sharpening, sound and HUD.
+  sharpening, Mario's gloves or your own hands, sound and HUD.
 
 By [Lucas Martinic](https://lucasmartinic.com): [X @lucas_martinic](https://x.com/lucas_martinic) ·
 [Instagram @lucasmartinic](https://www.instagram.com/lucasmartinic/) ·
@@ -177,7 +177,7 @@ adb install -r -g Mario64MR.apk
 ```
 
 (or drag it onto SideQuest). The game you made from your ROM stays on the headset, so you don't need to run the
-installer again. On PICO it's `Mario64MR-Pico.apk`; on the Steam Frame, run the [installer on the Frame](#on-the-frame-itself-no-computer-needed)
+installer again, unless the release says so (when the game itself changes, as in 1.3). On PICO it's `Mario64MR-Pico.apk`; on the Steam Frame, run the [installer on the Frame](#on-the-frame-itself-no-computer-needed)
 again.
 
 ## Playing
@@ -269,6 +269,7 @@ Move with the stick, change with the stick left / right, A to pick, B to go back
 | Graphics › Foveation | Draws the edges of your view at a lower resolution, to save power: off to high |
 | Graphics › Textures | The game's textures in the distance: as the N64 drew them (they shimmer far away), or smoothed with mipmaps and anisotropic filtering |
 | Graphics › Sharpening | The headset's own sharpening of the picture |
+| Graphics › Hands | Your hands over the window and in the level: Mario's white gloves, or your own (passthrough). Out in your room they're always your own |
 | Graphics › Defaults | Puts all the graphics options back as they were |
 | Sound | The music, sound effects and ambience volumes |
 | HUD | The lives, coins and stars counters on or off |
@@ -307,7 +308,8 @@ What's different from the Quest:
   it, the right trigger opens or closes it, and the right stick resizes it.
 - **No room scan**, so the cartridge lands on the floor, not on your table.
 - **Grey passthrough**: the Frame's cameras are black and white.
-- In the options, **refresh rate** and **sharpening** do nothing: the Frame runs at its own rate.
+- In the options, **refresh rate** and **sharpening** do nothing: the Frame runs at its own rate. **Hands** does
+  nothing either: the gloves hold the controllers.
 
 ### On the Frame itself (no computer needed)
 
