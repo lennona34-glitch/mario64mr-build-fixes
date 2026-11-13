@@ -67,8 +67,8 @@ The tool in this repository makes the game from your ROM on your own computer, a
   - (WSL on Windows works too, like Linux. Put this repository in your WSL home (`cd ~`, then `git clone` it there)
     rather than on a Windows drive (`/mnt/c/...`): building there is much slower, and long paths can go past
     Windows' limit.)
-- (Optionally) The Android NDK. The tool finds one installed by Android Studio, Homebrew (`brew install --cask android-ndk`) or
-  Unity. Not neccessary because it automatically downloads r27c from Google the first time (about 700 MB, 2 GB unpacked).
+- The Android NDK (optional): the tool finds one installed by Android Studio, Homebrew (`brew install --cask android-ndk`)
+  or Unity, and otherwise downloads r27c from Google the first time (about 700 MB, 2 GB unpacked).
 
 ## Install
 
