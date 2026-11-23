@@ -174,6 +174,16 @@ def prepare_pack(work, rom):
     (work / "sound/sequences/00_sound_player.s").unlink(missing_ok=True)
 
 
+def pack_targets(work):
+    """What the pack build makes: the sound banks, every skybox cut into tiles, and the cake (the ending's picture,
+    cut the same way). The WSL build (windows/make_game_wsl.py) asks for the same list ("PACK TARGETS" there is
+    compared with this one by the Windows run): without the skyboxes base.zip has no skies, and nothing notices."""
+    targets = [f"{PACK_BUILD}/sound/sound_data.ctl", f"{PACK_BUILD}/sound/sequences.bin"]
+    targets += [f"{PACK_BUILD}/bin/{p.stem}_skybox.c" for p in sorted((work / "textures/skyboxes").glob("*.png"))]
+    targets.append(f"{PACK_BUILD}/levels/ending/cake.inc.c")
+    return targets
+
+
 def jobs():
     """How many jobs to run at once: two per core (the usual oversubscription: much of a build is one core waiting on
     a file), at least 4."""
@@ -228,7 +238,13 @@ def extract(work):
     print("  %d:%02d  extracted" % ((time.time() - began) // 60, (time.time() - began) % 60), flush=True)
 
 
-def build_pack(work):
+    targets = [f"{PACK_BUILD}/sound/sound_data.ctl", f"{PACK_BUILD}/sound/sequences.bin"]
+    targets += [f"{PACK_BUILD}/bin/{p.stem}_skybox.c" for p in sorted((work / "textures/skyboxes").glob("*.png"))]
+    targets.append(f"{PACK_BUILD}/levels/ending/cake.inc.c")
+    return targets
+
+
+def build_pack(work, in_wsl=False):
     # (tools/audiofile: the library tabledesign links against, built first. Upstream's tools/Makefile has no edge
     #  from tabledesign to audiofile/libaudiofile.a, so make -j can link it before the library exists: "cannot find
     #  -laudiofile". Built alone first, then the rest in parallel.)
@@ -237,13 +253,12 @@ def build_pack(work):
     # (extracted once: on a Windows drive its tens of thousands of small files take minutes to check again)
     if not extracted(work):
         extract(work)
-    # Only the resource pack's parts of the game build: the sound banks, and the skyboxes (and cake) cut into tiles
-    targets = [f"{PACK_BUILD}/sound/sound_data.ctl", f"{PACK_BUILD}/sound/sequences.bin"]
-    targets += [f"{PACK_BUILD}/bin/{p.stem}_skybox.c" for p in sorted((work / "textures/skyboxes").glob("*.png"))]
-    targets.append(f"{PACK_BUILD}/levels/ending/cake.inc.c")  # (the ending's cake picture, cut the same way)
+    if in_wsl:  # (opt-in: on some Windows setups the sound tools take minutes per file, and never finish)
+        build_pack_in_wsl(work)
+        return
     # (the system's compiler and preprocessor: on macOS the Makefile would look for Homebrew's gcc)
     run(["make", "-j" + jobs(), "VERSION=us", "EXTERNAL_DATA=1", "BUILD_DIR=" + PACK_BUILD, "NOEXTRACT=1", "HOST_OS=Linux",
-         "OSX_BUILD=0", "CC=cc", "CXX=c++", "CPP=cc -E -P -x c"] + targets, cwd=work)
+         "OSX_BUILD=0", "CC=cc", "CXX=c++", "CPP=cc -E -P -x c"] + pack_targets(work), cwd=work)
 
 
 def pack(work, out):
@@ -348,6 +363,30 @@ def find_ndk(work, given):
             print(f"Android NDK: {c}")
             return Path(c).resolve()  # (make runs in other folders: a relative --ndk wouldn't be found from there)
     return download_ndk(work)
+
+
+def build_pack_in_wsl(work):
+    r"""The pack build where MSYS2's sound tools don't run: the same targets, built by WSL's own gcc from a copy of
+    the sources, then copied back into the work folder as if they had been made there. WSL copies from the Windows
+    folder, builds, and copies back, and the paths it is handed are its own (wslpath -u of the Windows ones, /mnt/c/...):
+    a \wsl$ path is one Windows opens, not WSL."""
+    script = HERE / "windows/make_game_wsl.py"
+    tree = f"~/mario64mr-wsl/{work.name}"
+
+    def wslpath(path):
+        """A Windows path as WSL's own: wslpath -u of it, into this run (not through bash, which would read the
+        backslashes of a Windows path as escapes)."""
+        windows = subprocess.check_output(["cygpath", "-w", str(path)], text=True).strip()
+        return subprocess.check_output(["wsl.exe", "-e", "wslpath", "-u", windows], text=True).strip()
+
+    here, there = wslpath(script), wslpath(work)
+    print("Building the pack in WSL, as asked (--pack-in-wsl)...", flush=True)
+    run(["wsl.exe", "-e", "bash", "--noprofile", "--norc", "-c", " && ".join([
+        f"python3 {shlex.quote(here)} --copy {shlex.quote(there)} {tree}",
+        f"cd {tree} && python3 {shlex.quote(here)} --pack {PACK_BUILD}",
+        f"cd {tree} && python3 {shlex.quote(here)} --winpath {shlex.quote(there)} {PACK_BUILD}"])])
+    if not (work / PACK_BUILD / "sound/sequences.bin").is_file():
+        sys.exit(f"The pack built in WSL, but it is not back in {work}: see the lines above")
 
 
 def on_in_wsl():
@@ -710,6 +749,9 @@ def main():
     parser.add_argument("--push", action="store_true", help="also adb push it to the headset")
     parser.add_argument("--label", type=Path, help="your own cartridge label: a square PNG or JPEG (see the README)")
     parser.add_argument("--check", action="store_true", help="only check the ROM, and stop")
+    parser.add_argument("--pack-in-wsl", action="store_true", dest="pack_in_wsl",
+                        help="build the resource pack in WSL instead of here: for Windows, where the sound tools are "
+                             "very slow (needs WSL with build-essential, git and python3 in it)")
     parser.add_argument("--wait", action="store_true", help="with --push: if no headset is connected, wait for it")
     parser.add_argument("--apk", type=Path, help="with --push: also install the app (Mario64MR.apk) on the headset")
     parser.add_argument("--frame", nargs="?", const="frame", metavar="HOST",
@@ -735,6 +777,9 @@ def main():
                 sys.exit(f"{tool} not found: this WSL has no build tools yet. Install them, then run this again:\n"
                          f"  sudo apt update && sudo apt install -y build-essential git python3")
             sys.exit(f"{tool} not found (see the top of this script for what is needed)")
+    if args.pack_in_wsl and not MSYS:
+        sys.exit("--pack-in-wsl is for the Windows installer (install_mario64mr.bat): here the pack builds "
+                 "natively, and there is nothing to work around")
     work, out = args.work.resolve(), args.out.resolve()
     if on_windows_drive(work):
         print(f"Note: {work} is on a Windows drive. It works, but building there is much slower than in your WSL "
@@ -747,7 +792,7 @@ def main():
     print("== The game data, from your ROM", flush=True)
     fetch(SM64EX, SM64EX_REVISION, sm64ex, shallow=True)
     prepare_pack(sm64ex, rom)
-    build_pack(sm64ex)
+    build_pack(sm64ex, in_wsl=args.pack_in_wsl)
     (out / "baserom.us.z64").write_bytes(rom)
     pack(sm64ex, out)
 

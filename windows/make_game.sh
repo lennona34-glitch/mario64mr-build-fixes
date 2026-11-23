@@ -8,6 +8,9 @@ if [ -n "$M64_ADB" ]; then
     export PATH="$PATH:$(cygpath -u "$M64_ADB")"
 fi
 args=("$(cygpath -u "$M64_ROM")" --work "$(cygpath -u "$M64_WORK")")
+if [ -n "$M64_PACK_IN_WSL" ]; then
+    args+=(--pack-in-wsl)
+fi
 if [ -n "$M64_PUSH" ]; then
     args+=(--push --wait)
 fi

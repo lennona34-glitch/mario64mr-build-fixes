@@ -16,6 +16,7 @@ param(
     [string]$Rom,          # your ROM (else a file dialog asks for it)
     [switch]$NoPush,       # make the game but don't send it to the headset
     [switch]$Check,        # only check the ROM
+    [switch]$PackInWsl,    # build the pack in WSL (--pack-in-wsl): where MSYS2's sound tools never finish
     [string]$Frame         # (a Steam Frame: not from Windows, see below)
 )
 $ErrorActionPreference = "Stop"
@@ -173,6 +174,7 @@ $env:M64_WORK = Join-Path $Root "work"
 $env:M64_ADB = if ($adbDir) { $adbDir } else { "" }
 $env:M64_PUSH = if ($NoPush) { "" } else { "1" }
 $env:M64_FRAME = ""
+$env:M64_PACK_IN_WSL = if ($PackInWsl) { "1" } else { "" }
 # (a script, the paths in the environment: Windows PowerShell drops quotes inside the arguments it passes)
 & $Bash -l (Join-Path $PSScriptRoot "make_game.sh").Replace('\', '/')
 if ($LASTEXITCODE -ne 0) { Fail "Making the game failed (see above). Running install_mario64mr.bat again picks up where it stopped." }
